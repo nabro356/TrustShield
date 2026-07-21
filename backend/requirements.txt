@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+pydantic
+networkx
+google-genai
+python-multipart
+websockets
+python-dotenv
+python-louvain
+aiofiles

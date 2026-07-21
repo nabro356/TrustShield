@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent"
+    android:layout_height="wrap_content"
+    android:orientation="vertical"
+    android:background="#DDdc2626"
+    android:padding="24dp"
+    android:gravity="center">
+
+    <TextView
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="🚨 SCAM ALERT 🚨"
+        android:textColor="#FFFFFF"
+        android:textSize="24sp"
+        android:textStyle="bold"
+        android:layout_marginBottom="8dp"/>
+
+    <TextView
+        android:id="@+id/tv_scam_details"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Digital Arrest Scam Detected\nThreat Score: 95%"
+        android:textColor="#FFFFFF"
+        android:textSize="18sp"
+        android:gravity="center"
+        android:layout_marginBottom="16dp"/>
+        
+    <TextView
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:text="Do not transfer any money. Real police will never ask for money over a video call."
+        android:textColor="#EEEEEE"
+        android:textSize="14sp"
+        android:gravity="center"
+        android:layout_marginBottom="24dp"/>
+
+    <Button
+        android:id="@+id/btn_dismiss_alert"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:text="HANG UP NOW"
+        android:textColor="#dc2626"
+        android:backgroundTint="#FFFFFF"
+        android:textStyle="bold"/>
+
+</LinearLayout>

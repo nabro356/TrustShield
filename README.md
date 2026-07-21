@@ -17,8 +17,8 @@ ShieldNet is a state-of-the-art, event-driven multi-agent platform designed to p
 
 ## 🌟 Key Capabilities
 
-- **🤖 Multi-Modal AI Agents**: Utilizes asynchronous workers to process diverse data streams, including image analysis (Gemini 2.0 Flash Vision), audio transcriptions, and text logs to detect fraudulent patterns with high accuracy.
-- **🕸️ Graph AI & Analytics**: Employs advanced entity resolution and community detection algorithms (using NetworkX/Neo4j) to uncover structured scam syndicates, tracking how malicious actors are connected.
+- **🤖 Multi-Modal AI Agents**: Utilizes asynchronous workers to process diverse data streams, including image analysis (Fine Tuned SLMs / Gemini 2.0 Flash Vision), audio transcriptions, and text logs to detect fraudulent patterns with high accuracy.
+- **🕸️ Graph AI & Analytics**: Employs advanced entity resolution and community detection algorithms (using Neo4j) to uncover structured scam syndicates, tracking how malicious actors are connected.
 - **⚡ Real-Time Threat Streaming**: High-throughput FastAPI WebSocket connections push live threat updates, alerts, and telemetry directly to the command center without delay.
 - **📱 On-Device Mobile Protection**: A native Android client leveraging Android Accessibility Services to screen live calls, SMS messages, and digital interactions in real-time to alert users of potential scams *before* they fall victim.
 - **💻 Command & Control UI**: A modern Next.js interface featuring interactive D3-based graph visualizers, live geospatial threat maps, and a file sandbox for deep forensic analysis.

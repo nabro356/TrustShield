@@ -1,0 +1,818 @@
+Based on your `CC_Dec25` dataset structure (`Date`, `Part Name`, `Part Site`, `Bulk Value`, `Quantity`, `Business Segment Value`, `Business Segment Description`, and `Region Id`), two preprocessing details are handled explicitly in the notebook below:
+
+* **Strict String & Numeric Parsing:** Comma-formatted quantities (e.g., `1,050.00`) are stripped of thousand separators before numeric conversion, while `Part Name`, `Bulk Value`, and `Business Segment Value` are forced as strings to prevent leading-zero truncation or `.0` float coercion.
+
+
+* **Granularity Attribute Check:** A single `Part Name` + `Region Id` can span multiple `Business Segment Description` values (for example, `10028423829` in `LATAM` records transactions under both `Industrial Applications` and `Personal Care & Homecare`), so the EDA includes a dimension-cardinality check before rolling up to the `Part Name + Region Id` monthly level.
+
+
+
+Copy the cells below directly into a Jupyter Notebook (`.ipynb`) or save as a `.py` file and open in VS Code / JupyterLab using Jupytext.
+
+---
+
+## Cell 1: Imports & Notebook Configuration
+
+```python
+# %% [markdown]
+# # CC_Dec25 — Data Cleaning, Attrition Audit & Time-Series EDA
+# **Forecasting Granularity:** `Part Name` + `Region Id` (Monthly)  
+# **Expected Horizon:** October 2022 – December 2025 (39 Calendar Months)
+
+# %%
+import warnings
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mtick
+import seaborn as sns
+from IPython.display import display, Markdown
+
+warnings.filterwarnings("ignore")
+
+# Display & plotting defaults
+pd.set_option("display.max_columns", 50)
+pd.set_option("display.max_rows", 100)
+pd.set_option("display.float_format", lambda x: f"{x:,.2f}")
+sns.set_theme(style="whitegrid", palette="deep")
+plt.rcParams["figure.figsize"] = (14, 5)
+plt.rcParams["axes.titlesize"] = 13
+plt.rcParams["axes.titleweight"] = "bold"
+
+# ==============================================================================
+# CONFIGURATION — Update FILE_PATH to your local CSV (or XLSX) path
+# ==============================================================================
+FILE_PATH = Path("CC_Dec25.csv")   # Also supports .xlsx (reads sheet_name="HDA")
+SHEET_NAME = "HDA"                 # Used only if FILE_PATH is .xlsx
+OUTPUT_DIR = Path("eda_outputs")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+```
+
+---
+
+## Cell 2: Data Ingestion & Schema Normalization
+
+```python
+# %% [markdown]
+# ## 1. Data Ingestion & Raw Schema Audit
+# Enforces string types on all categorical/ID fields, normalizes whitespace-only blanks to `NaN`, and safely parses comma-formatted quantities and `DD-MMM-YY` dates.
+
+# %%
+STRING_COLS = [
+    "Part Name",
+    "Part Site",
+    "Bulk Value",
+    "Business Segment Value",
+    "Business Segment Description",
+    "Region Id",
+]
+
+def load_raw_dataset(path: Path, sheet_name: str = "HDA") -> pd.DataFrame:
+    dtype_map = {col: "string" for col in STRING_COLS}
+    dtype_map["Quantity"] = "string"  # Parse manually to handle commas safely
+
+    if path.suffix.lower() in [".xlsx", ".xls"]:
+        df = pd.read_excel(path, sheet_name=sheet_name, dtype=dtype_map)
+    else:
+        df = pd.read_csv(path, dtype=dtype_map, low_memory=False)
+
+    # Standardize column headers (strip accidental leading/trailing spaces)
+    df.columns = [c.strip() for c in df.columns]
+
+    # Clean string columns: strip whitespace and convert empty/placeholder strings to pd.NA
+    blank_tokens = {"", "nan", "none", "null", "na", "n/a", "-"}
+    for col in STRING_COLS:
+        if col in df.columns:
+            cleaned = df[col].astype("string").str.strip()
+            cleaned = cleaned.mask(cleaned.str.lower().isin(blank_tokens), pd.NA)
+            df[col] = cleaned
+
+    # Clean Quantity: strip commas/spaces and convert to float64
+    qty_clean = (
+        df["Quantity"]
+        .astype("string")
+        .str.replace(",", "", regex=False)
+        .str.strip()
+    )
+    df["Quantity"] = pd.to_numeric(qty_clean, errors="coerce")
+
+    # Parse Date (handles formats like '25-Nov-22', '2022-11-25', etc.)
+    df["Date"] = pd.to_datetime(df["Date"], format="mixed", dayfirst=True, errors="coerce")
+
+    return df
+
+raw_df = load_raw_dataset(FILE_PATH, SHEET_NAME)
+raw_df["Part_Region_Key"] = raw_df["Part Name"].fillna("MISSING") + " | " + raw_df["Region Id"].fillna("MISSING")
+
+print(f"Raw Dataset Shape       : {raw_df.shape[0]:,} rows x {raw_df.shape[1]-1} columns")
+print(f"Raw Date Range          : {raw_df['Date'].min().strftime('%Y-%m-%d')} to {raw_df['Date'].max().strftime('%Y-%m-%d')}")
+print(f"Unparseable Dates       : {raw_df['Date'].isna().sum():,}")
+print(f"Unparseable Quantities  : {raw_df['Quantity'].isna().sum():,}")
+print(f"Raw Net Quantity Sum    : {raw_df['Quantity'].sum():,.2f}")
+print(f"Raw Positive Qty Sum    : {raw_df.loc[raw_df['Quantity'] > 0, 'Quantity'].sum():,.2f}")
+
+# Raw column-level profile
+schema_audit = pd.DataFrame({
+    "Dtype": raw_df.drop(columns=["Part_Region_Key"]).dtypes.astype(str),
+    "Non_Null_Rows": raw_df.drop(columns=["Part_Region_Key"]).notna().sum(),
+    "Blank_or_Null_Rows": raw_df.drop(columns=["Part_Region_Key"]).isna().sum(),
+    "Blank_%": (raw_df.drop(columns=["Part_Region_Key"]).isna().mean() * 100).round(2),
+    "Unique_Values": raw_df.drop(columns=["Part_Region_Key"]).nunique(dropna=True),
+})
+display(Markdown("### Raw Schema & Missingness Summary"))
+display(schema_audit)
+
+```
+
+---
+
+## Cell 3: Detailed Data Cleaning & Attrition Waterfall Analysis
+
+```python
+# %% [markdown]
+# ## 2. Data Cleaning & Detailed Attrition Analysis
+# Applies the four exclusion rules:
+# 1. `Quantity <= 0.0` (or null)
+# 2. `Business Segment Description` is blank
+# 3. `Part Name` starts with `'9'`
+# 4. `Bulk Value` is blank
+#
+# Reports both **Independent Rule Flags** (to expose rule overlaps) and the **Sequential Waterfall** (exact step-by-step attrition).
+
+# %%
+# Define boolean exclusion masks on raw_df
+mask_qty = raw_df["Quantity"].isna() | (raw_df["Quantity"] <= 0.0)
+mask_seg = raw_df["Business Segment Description"].isna()
+mask_part9 = raw_df["Part Name"].fillna("").str.startswith("9")
+mask_bulk = raw_df["Bulk Value"].isna()
+
+# Also flag if Part Name or Region Id itself is missing (safety check for forecasting key)
+mask_key_missing = raw_df["Part Name"].isna() | raw_df["Region Id"].isna()
+
+# ------------------------------------------------------------------------------
+# A. Independent Rule Impact (Evaluated independently on the full raw dataset)
+# ------------------------------------------------------------------------------
+rules_dict = {
+    "Rule 1: Quantity <= 0.0 (or NaN)": mask_qty,
+    "Rule 2: Business Segment Description Blank": mask_seg,
+    "Rule 3: Part Name Starts with '9'": mask_part9,
+    "Rule 4: Bulk Value Blank": mask_bulk,
+    "Safety Check: Part Name or Region Id Blank": mask_key_missing,
+}
+
+indep_rows = []
+total_raw_rows = len(raw_df)
+total_raw_pos_qty = raw_df.loc[raw_df["Quantity"] > 0, "Quantity"].sum()
+
+for rule_name, m in rules_dict.items():
+    flagged = raw_df[m]
+    pos_qty_flagged = flagged.loc[flagged["Quantity"] > 0, "Quantity"].sum()
+    neg_qty_flagged = flagged.loc[flagged["Quantity"] < 0, "Quantity"].sum()
+    zero_rows = (flagged["Quantity"] == 0).sum()
+    neg_rows = (flagged["Quantity"] < 0).sum()
+    indep_rows.append({
+        "Cleaning_Rule": rule_name,
+        "Flagged_Rows": len(flagged),
+        "Flagged_Rows_%": round(len(flagged) / total_raw_rows * 100, 2),
+        "Zero_Qty_Rows": zero_rows,
+        "Negative_Qty_Rows": neg_rows,
+        "Positive_Qty_Affected": pos_qty_flagged,
+        "Positive_Qty_%": round(pos_qty_flagged / total_raw_pos_qty * 100, 2),
+        "Negative_Qty_Affected": neg_qty_flagged,
+        "Unique_Parts_Affected": flagged["Part Name"].nunique(dropna=True),
+        "Unique_Part_Regions_Affected": flagged["Part_Region_Key"].nunique(),
+    })
+
+indep_df = pd.DataFrame(indep_rows)
+display(Markdown("### A. Independent Rule Impact (Before Considering Rule Overlaps)"))
+display(indep_df)
+
+# ------------------------------------------------------------------------------
+# B. Sequential Waterfall Analysis
+# ------------------------------------------------------------------------------
+waterfall_steps = [
+    ("0. Raw Dataset (Initial)", pd.Series(False, index=raw_df.index)),
+    ("1. Remove Quantity <= 0.0", mask_qty),
+    ("2. Remove Blank Business Segment Description", mask_seg),
+    ("3. Remove Part Name Starting with '9'", mask_part9),
+    ("4. Remove Blank Bulk Value", mask_bulk),
+    ("5. Remove Missing Part Name / Region Id / Date", mask_key_missing | raw_df["Date"].isna()),
+]
+
+curr_df = raw_df.copy()
+waterfall_records = []
+
+for step_name, step_mask in waterfall_steps:
+    if step_name.startswith("0."):
+        removed_rows = 0
+        removed_pos_qty = 0.0
+    else:
+        aligned_mask = step_mask.loc[curr_df.index]
+        dropped_slice = curr_df[aligned_mask]
+        removed_rows = len(dropped_slice)
+        removed_pos_qty = dropped_slice.loc[dropped_slice["Quantity"] > 0, "Quantity"].sum()
+        curr_df = curr_df[~aligned_mask].copy()
+
+    waterfall_records.append({
+        "Step": step_name,
+        "Rows_Removed": removed_rows,
+        "Rows_Remaining": len(curr_df),
+        "Retained_Rows_%": round(len(curr_df) / total_raw_rows * 100, 2),
+        "Pos_Qty_Removed": removed_pos_qty,
+        "Qty_Remaining": curr_df["Quantity"].sum(),
+        "Retained_Qty_%": round(curr_df["Quantity"].sum() / total_raw_pos_qty * 100, 2),
+        "Unique_Parts": curr_df["Part Name"].nunique(),
+        "Unique_Regions": curr_df["Region Id"].nunique(),
+        "Unique_Part_Region_Pairs": curr_df["Part_Region_Key"].nunique(),
+    })
+
+waterfall_df = pd.DataFrame(waterfall_records)
+display(Markdown("### B. Sequential Cleaning Waterfall"))
+display(waterfall_df)
+
+# Diagnostic breakdown of removed records by Region Id
+diag_by_region = pd.DataFrame({
+    "Raw_Rows": raw_df.groupby("Region Id", dropna=False).size(),
+    "Removed_Qty_<=0": raw_df[mask_qty].groupby("Region Id", dropna=False).size(),
+    "Removed_Blank_Seg": raw_df[mask_seg].groupby("Region Id", dropna=False).size(),
+    "Removed_Part_9xx": raw_df[mask_part9].groupby("Region Id", dropna=False).size(),
+    "Removed_Blank_Bulk": raw_df[mask_bulk].groupby("Region Id", dropna=False).size(),
+    "Clean_Rows_Remaining": curr_df.groupby("Region Id", dropna=False).size(),
+}).fillna(0).astype(int)
+diag_by_region["Retention_%"] = (diag_by_region["Clean_Rows_Remaining"] / diag_by_region["Raw_Rows"] * 100).round(2)
+
+display(Markdown("### C. Cleaning Attrition Breakdown by Region Id"))
+display(diag_by_region.sort_values("Raw_Rows", ascending=False))
+
+# Plot Waterfall
+fig, axes = plt.subplots(1, 2, figsize=(15, 5))
+short_labels = ["Raw", "Qty > 0", "Valid Seg", "No '9' Part", "Valid Bulk", "Valid Keys"]
+
+sns.barplot(x=short_labels, y=waterfall_df["Rows_Remaining"], ax=axes[0], palette="Blues_d")
+axes[0].set_title("Row Retention Across Cleaning Steps")
+axes[0].set_ylabel("Row Count")
+axes[0].yaxis.set_major_formatter(mtick.StrMethodFormatter("{x:,.0f}"))
+for i, v in enumerate(waterfall_df["Rows_Remaining"]):
+    axes[0].text(i, v, f"{v:,.0f}\n({waterfall_df['Retained_Rows_%'].iloc[i]}%)", ha="center", va="bottom", fontsize=9)
+
+sns.barplot(x=short_labels, y=waterfall_df["Qty_Remaining"], ax=axes[1], palette="Greens_d")
+axes[1].set_title("Positive Volume (Quantity) Retention Across Cleaning Steps")
+axes[1].set_ylabel("Total Quantity")
+axes[1].yaxis.set_major_formatter(mtick.StrMethodFormatter("{x:,.0f}"))
+for i, v in enumerate(waterfall_df["Qty_Remaining"]):
+    axes[1].text(i, v, f"{v:,.0f}\n({waterfall_df['Retained_Qty_%'].iloc[i]}%)", ha="center", va="bottom", fontsize=9)
+
+plt.tight_layout()
+plt.show()
+
+# Final clean transactional dataframe
+clean_df = curr_df.copy()
+clean_df["Year"] = clean_df["Date"].dt.year
+clean_df["Month"] = clean_df["Date"].dt.month
+clean_df["YearMonth"] = clean_df["Date"].dt.to_period("M")
+
+```
+
+---
+
+## Cell 4: Core EDA & Forecasting Granularity Integrity Check
+
+```python
+# %% [markdown]
+# ## 3. Core EDA & Granularity Integrity Check (`Part Name + Region Id`)
+# Before aggregating to `Part Name + Region Id`, we check whether each pair maps cleanly 1-to-1 to `Part Site`, `Bulk Value`, and `Business Segment Description`, and inspect transactional & monthly distributions.
+
+# %%
+display(Markdown("### A. Clean Dataset Summary Metrics"))
+summary_metrics = pd.DataFrame({
+    "Metric": [
+        "Clean Transaction Rows",
+        "Date Range",
+        "Total Calendar Months Covered",
+        "Total Clean Quantity",
+        "Unique Part Names",
+        "Unique Region Ids",
+        "Unique (Part Name + Region Id) Series",
+        "Unique Part Sites",
+        "Unique Bulk Values",
+        "Unique Business Segment Values",
+        "Unique Business Segment Descriptions",
+    ],
+    "Value": [
+        f"{len(clean_df):,}",
+        f"{clean_df['Date'].min().strftime('%Y-%m-%d')} to {clean_df['Date'].max().strftime('%Y-%m-%d')}",
+        f"{clean_df['YearMonth'].nunique()}",
+        f"{clean_df['Quantity'].sum():,.2f}",
+        f"{clean_df['Part Name'].nunique():,}",
+        f"{clean_df['Region Id'].nunique():,}",
+        f"{clean_df['Part_Region_Key'].nunique():,}",
+        f"{clean_df['Part Site'].nunique():,}",
+        f"{clean_df['Bulk Value'].nunique():,}",
+        f"{clean_df['Business Segment Value'].nunique():,}",
+        f"{clean_df['Business Segment Description'].nunique():,}",
+    ]
+})
+display(summary_metrics)
+
+# ------------------------------------------------------------------------------
+# B. Granularity Integrity Check: Does (Part Name + Region Id) have multiple attributes?
+# ------------------------------------------------------------------------------
+attr_cardinality = clean_df.groupby(["Part Name", "Region Id"], as_index=False).agg(
+    Distinct_Sites=("Part Site", "nunique"),
+    Distinct_Bulk_Values=("Bulk Value", "nunique"),
+    Distinct_Seg_Values=("Business Segment Value", "nunique"),
+    Distinct_Seg_Descs=("Business Segment Description", "nunique"),
+    Total_Transactions=("Quantity", "count"),
+    Total_Quantity=("Quantity", "sum"),
+)
+
+multi_attr_summary = pd.DataFrame({
+    "Attribute": ["Part Site", "Bulk Value", "Business Segment Value", "Business Segment Description"],
+    "Pairs_With_1_Value": [
+        (attr_cardinality["Distinct_Sites"] == 1).sum(),
+        (attr_cardinality["Distinct_Bulk_Values"] == 1).sum(),
+        (attr_cardinality["Distinct_Seg_Values"] == 1).sum(),
+        (attr_cardinality["Distinct_Seg_Descs"] == 1).sum(),
+    ],
+    "Pairs_With_Multiple_Values": [
+        (attr_cardinality["Distinct_Sites"] > 1).sum(),
+        (attr_cardinality["Distinct_Bulk_Values"] > 1).sum(),
+        (attr_cardinality["Distinct_Seg_Values"] > 1).sum(),
+        (attr_cardinality["Distinct_Seg_Descs"] > 1).sum(),
+    ],
+})
+multi_attr_summary["Multi_Value_%"] = (
+    multi_attr_summary["Pairs_With_Multiple_Values"] / len(attr_cardinality) * 100
+).round(2)
+
+display(Markdown("### B. Granularity Integrity: Attribute Cardinality per `Part Name + Region Id`"))
+display(multi_attr_summary)
+
+# ------------------------------------------------------------------------------
+# C. Transactional vs. Monthly Aggregated Distribution Stats
+# ------------------------------------------------------------------------------
+monthly_df = (
+    clean_df.groupby(["Part Name", "Region Id", "Part_Region_Key", "Year", "Month", "YearMonth"], as_index=False)
+    .agg(
+        Monthly_Qty=("Quantity", "sum"),
+        Order_Count=("Quantity", "count"),
+        Primary_Segment=("Business Segment Description", lambda s: s.mode().iloc[0]),
+        Primary_Site=("Part Site", lambda s: s.mode().iloc[0]),
+        Primary_Bulk=("Bulk Value", lambda s: s.mode().iloc[0]),
+    )
+)
+
+dist_stats = pd.DataFrame({
+    "Transactional_Quantity": clean_df["Quantity"].describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9, 0.99]),
+    "Monthly_Part_Region_Qty": monthly_df["Monthly_Qty"].describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9, 0.99]),
+})
+display(Markdown("### C. Quantity Distribution Summary (Transactional vs. Monthly Aggregated)"))
+display(dist_stats)
+
+```
+
+---
+
+## Cell 5: Complete Data Availability & Year-Presence Cohort Report (`Oct 2022 – Dec 2025`)
+
+```python
+# %% [markdown]
+# ## 4. Data Availability & Year-Cohort Report (`Part Name + Region Id`)
+# Evaluates every `Part Name + Region Id` series across **Oct 2022 – Dec 2025 (39 months)** to report:
+# - **All Year-Presence Combinations/Iterations** (e.g., `2022, 2023, 2024, 2025`, `2023, 2024, 2025`, `2023 only`, `2024 only`, `2025 only`, discontinuous gap patterns like `2023, 2025`, etc.)
+# - **Active Months Available** (overall and per calendar year: `2022`, `2023`, `2024`, `2025`)
+# - **Recency & Continuity Metrics** (`First_Month`, `Last_Month`, `Span_Months`, `Months_Since_Dec2025`, `ADI`, `CV`)
+# - **Actionable Forecastability Triage**
+
+# %%
+MAX_PERIOD = pd.Period("2025-12", freq="M")
+MIN_PERIOD = pd.Period("2022-10", freq="M")
+
+# Monthly counts per year for each Part Name + Region Id
+yr_pivot = (
+    monthly_df.pivot_table(
+        index=["Part Name", "Region Id", "Part_Region_Key"],
+        columns="Year",
+        values="Monthly_Qty",
+        aggfunc="count",
+        fill_value=0,
+    )
+    .reset_index()
+)
+for yr in [2022, 2023, 2024, 2025]:
+    if yr not in yr_pivot.columns:
+        yr_pivot[yr] = 0
+yr_pivot = yr_pivot.rename(columns={2022: "Mos_2022", 2023: "Mos_2023", 2024: "Mos_2024", 2025: "Mos_2025"})
+
+# Series-level history & demand behavior metrics
+series_profile = (
+    monthly_df.groupby(["Part Name", "Region Id", "Part_Region_Key"], as_index=False)
+    .agg(
+        Active_Months=("YearMonth", "nunique"),
+        First_Month=("YearMonth", "min"),
+        Last_Month=("YearMonth", "max"),
+        Total_Quantity=("Monthly_Qty", "sum"),
+        Total_Orders=("Order_Count", "sum"),
+        Mean_Active_Monthly_Qty=("Monthly_Qty", "mean"),
+        Std_Active_Monthly_Qty=("Monthly_Qty", "std"),
+        Primary_Segment=("Primary_Segment", "first"),
+        Primary_Site=("Primary_Site", "first"),
+        Primary_Bulk=("Primary_Bulk", "first"),
+    )
+)
+
+series_profile = series_profile.merge(
+    yr_pivot[["Part Name", "Region Id", "Mos_2022", "Mos_2023", "Mos_2024", "Mos_2025"]],
+    on=["Part Name", "Region Id"],
+    how="left",
+)
+
+# Build exact Year-Presence Combination string (all possible iterations)
+def build_year_combo(row):
+    active_yrs = [str(y) for y, col in [(2022, "Mos_2022"), (2023, "Mos_2023"), (2024, "Mos_2024"), (2025, "Mos_2025")] if row[col] > 0]
+    if len(active_yrs) == 1:
+        return f"{active_yrs[0]} Only"
+    return " - ".join(active_yrs)
+
+series_profile["Year_Iteration"] = series_profile.apply(build_year_combo, axis=1)
+series_profile["Num_Active_Years"] = (
+    (series_profile["Mos_2022"] > 0).astype(int)
+    + (series_profile["Mos_2023"] > 0).astype(int)
+    + (series_profile["Mos_2024"] > 0).astype(int)
+    + (series_profile["Mos_2025"] > 0).astype(int)
+)
+
+# Span & Recency calculations (using ordinal integer difference on Period('M'))
+series_profile["Span_Months"] = (series_profile["Last_Month"].astype("int64") - series_profile["First_Month"].astype("int64")) + 1
+series_profile["Months_Since_Last_Order"] = MAX_PERIOD.ordinal - series_profile["Last_Month"].astype("int64")
+series_profile["Fill_Rate_Within_Span_%"] = (series_profile["Active_Months"] / series_profile["Span_Months"] * 100).round(1)
+
+# Syntetos-Boylan Demand Classification metrics (ADI & CV^2)
+series_profile["ADI"] = (series_profile["Span_Months"] / series_profile["Active_Months"]).round(2)
+series_profile["CV"] = (
+    series_profile["Std_Active_Monthly_Qty"].fillna(0) / series_profile["Mean_Active_Monthly_Qty"]
+).round(2)
+series_profile["CV2"] = (series_profile["CV"] ** 2).round(2)
+
+# ------------------------------------------------------------------------------
+# A. Complete Report Across ALL Year-Presence Iterations
+# ------------------------------------------------------------------------------
+total_series = len(series_profile)
+total_vol = series_profile["Total_Quantity"].sum()
+
+year_cohort_report = (
+    series_profile.groupby("Year_Iteration", as_index=False)
+    .agg(
+        Part_Region_Count=("Part_Region_Key", "count"),
+        Unique_Parts=("Part Name", "nunique"),
+        Total_Quantity=("Total_Quantity", "sum"),
+        Avg_Active_Months=("Active_Months", "mean"),
+        Median_Active_Months=("Active_Months", "median"),
+        Min_Active_Months=("Active_Months", "min"),
+        Max_Active_Months=("Active_Months", "max"),
+        Active_In_Q4_2025=("Months_Since_Last_Order", lambda s: (s <= 2).sum()),
+    )
+    .sort_values("Part_Region_Count", ascending=False)
+)
+
+year_cohort_report["Series_Share_%"] = (year_cohort_report["Part_Region_Count"] / total_series * 100).round(2)
+year_cohort_report["Volume_Share_%"] = (year_cohort_report["Total_Quantity"] / total_vol * 100).round(2)
+year_cohort_report["Avg_Active_Months"] = year_cohort_report["Avg_Active_Months"].round(1)
+
+# Reorder columns cleanly
+year_cohort_report = year_cohort_report[[
+    "Year_Iteration",
+    "Part_Region_Count",
+    "Series_Share_%",
+    "Unique_Parts",
+    "Total_Quantity",
+    "Volume_Share_%",
+    "Avg_Active_Months",
+    "Median_Active_Months",
+    "Min_Active_Months",
+    "Max_Active_Months",
+    "Active_In_Q4_2025",
+]]
+
+display(Markdown("### A. All Year-Presence Iterations Report (`Part Name + Region Id` Level)"))
+display(year_cohort_report)
+
+# ------------------------------------------------------------------------------
+# B. Distribution of Available Active Months (Bucketed & Exact)
+# ------------------------------------------------------------------------------
+bins = [0, 1, 3, 6, 12, 18, 24, 30, 36, 39]
+labels = [
+    "01 mo (Single-month spike)",
+    "02–03 mos",
+    "04–06 mos",
+    "07–12 mos",
+    "13–18 mos",
+    "19–24 mos",
+    "25–30 mos",
+    "31–36 mos",
+    "37–39 mos (Full 3+ yr span)",
+]
+series_profile["Months_Bucket"] = pd.cut(series_profile["Active_Months"], bins=bins, labels=labels)
+
+months_bucket_report = (
+    series_profile.groupby("Months_Bucket", observed=False, as_index=False)
+    .agg(
+        Part_Region_Count=("Part_Region_Key", "count"),
+        Total_Quantity=("Total_Quantity", "sum"),
+        Active_In_2025=("Mos_2025", lambda s: (s > 0).sum()),
+        Active_In_Q4_2025=("Months_Since_Last_Order", lambda s: (s <= 2).sum()),
+    )
+)
+months_bucket_report["Series_Share_%"] = (months_bucket_report["Part_Region_Count"] / total_series * 100).round(2)
+months_bucket_report["Volume_Share_%"] = (months_bucket_report["Total_Quantity"] / total_vol * 100).round(2)
+
+display(Markdown("### B. Active Months Availability Distribution"))
+display(months_bucket_report)
+
+# ------------------------------------------------------------------------------
+# C. Forecastability Triage Classification
+# ------------------------------------------------------------------------------
+def classify_forecastability(row):
+    if row["Mos_2025"] == 0 or row["Months_Since_Last_Order"] > 6:
+        return "4. Dormant / Discontinued (No orders in H2 2025)"
+    if row["Year_Iteration"] == "2025 Only":
+        return "3. Cold-Start / 2025 New SKU Only (Needs Analog/Global Pooling)"
+    if row["Active_Months"] >= 18 and row["Num_Active_Years"] >= 3:
+        return "1. Tier-1 Forecastable (Multi-Year >=18 Active Mos & Recent)"
+    if row["Active_Months"] >= 10 and row["Num_Active_Years"] >= 2:
+        return "2. Tier-2 Forecastable (2+ Years, 10-17 Active Mos & Recent)"
+    return "5. Ultra-Sparse / Intermittent (<10 Active Mos Across Multi-Year)"
+
+series_profile["Forecastability_Tier"] = series_profile.apply(classify_forecastability, axis=1)
+
+triage_report = (
+    series_profile.groupby("Forecastability_Tier", as_index=False)
+    .agg(
+        Part_Region_Count=("Part_Region_Key", "count"),
+        Unique_Parts=("Part Name", "nunique"),
+        Total_Quantity=("Total_Quantity", "sum"),
+        Avg_Active_Months=("Active_Months", "mean"),
+    )
+    .sort_values("Forecastability_Tier")
+)
+triage_report["Series_Share_%"] = (triage_report["Part_Region_Count"] / total_series * 100).round(2)
+triage_report["Volume_Share_%"] = (triage_report["Total_Quantity"] / total_vol * 100).round(2)
+triage_report["Avg_Active_Months"] = triage_report["Avg_Active_Months"].round(1)
+
+display(Markdown("### C. Forecasting Readiness Triage Summary"))
+display(triage_report)
+
+```
+
+---
+
+## Cell 6: Regional, Cross-Region Overlap & Business Segment EDA
+
+```python
+# %% [markdown]
+# ## 5. Regional, Portfolio Overlap & Business Segment EDA
+# Breaks down SKU counts, volume concentration, forecastable share per `Region Id`, cross-region part sharing, and `Business Segment Description` distributions.
+
+# %%
+# ------------------------------------------------------------------------------
+# A. Regional Breakdown (Part Counts, Volume, Forecastable Share)
+# ------------------------------------------------------------------------------
+series_profile["Is_Tier1_or_Tier2"] = series_profile["Forecastability_Tier"].str.startswith(("1.", "2."))
+
+region_summary = (
+    series_profile.groupby("Region Id", as_index=False)
+    .agg(
+        Unique_Part_Names=("Part Name", "nunique"),
+        Part_Region_Series=("Part_Region_Key", "count"),
+        Total_Quantity=("Total_Quantity", "sum"),
+        Total_Orders=("Total_Orders", "sum"),
+        Avg_Qty_Per_Part=("Total_Quantity", "mean"),
+        Median_Qty_Per_Part=("Total_Quantity", "median"),
+        Avg_Active_Months=("Active_Months", "mean"),
+        Tier1_Tier2_Series=("Is_Tier1_or_Tier2", "sum"),
+        Tier1_Tier2_Volume=("Total_Quantity", lambda s: s[series_profile.loc[s.index, "Is_Tier1_or_Tier2"]].sum()),
+    )
+    .sort_values("Total_Quantity", ascending=False)
+)
+
+region_summary["Volume_Share_%"] = (region_summary["Total_Quantity"] / total_vol * 100).round(2)
+region_summary["Series_Share_%"] = (region_summary["Part_Region_Series"] / total_series * 100).round(2)
+region_summary["Forecastable_Series_%"] = (region_summary["Tier1_Tier2_Series"] / region_summary["Part_Region_Series"] * 100).round(1)
+region_summary["Forecastable_Vol_%"] = (region_summary["Tier1_Tier2_Volume"] / region_summary["Total_Quantity"] * 100).round(1)
+region_summary["Avg_Active_Months"] = region_summary["Avg_Active_Months"].round(1)
+
+display(Markdown("### A. Regional EDA (`Part Name` Counts, Volume & Forecastable Share per `Region Id`)"))
+display(region_summary)
+
+# ------------------------------------------------------------------------------
+# B. Cross-Region Part Footprint (How many regions does each Part Name sell in?)
+# ------------------------------------------------------------------------------
+part_footprint = (
+    series_profile.groupby("Part Name", as_index=False)
+    .agg(
+        Region_Count=("Region Id", "nunique"),
+        Regions_List=("Region Id", lambda s: ", ".join(sorted(s.unique()))),
+        Total_Part_Qty=("Total_Quantity", "sum"),
+    )
+)
+
+footprint_dist = (
+    part_footprint.groupby("Region_Count", as_index=False)
+    .agg(
+        Unique_Parts=("Part Name", "count"),
+        Total_Quantity=("Total_Part_Qty", "sum"),
+    )
+)
+footprint_dist["Parts_Share_%"] = (footprint_dist["Unique_Parts"] / len(part_footprint) * 100).round(2)
+footprint_dist["Volume_Share_%"] = (footprint_dist["Total_Quantity"] / total_vol * 100).round(2)
+
+display(Markdown("### B. Cross-Region Part Sharing (Single-Region vs. Multi-Region SKUs)"))
+display(footprint_dist)
+
+# ------------------------------------------------------------------------------
+# C. Business Segment Description & Value Breakdown
+# ------------------------------------------------------------------------------
+segment_summary = (
+    clean_df.groupby(["Business Segment Value", "Business Segment Description"], as_index=False)
+    .agg(
+        Transactions=("Quantity", "count"),
+        Unique_Parts=("Part Name", "nunique"),
+        Unique_Part_Regions=("Part_Region_Key", "nunique"),
+        Unique_Regions=("Region Id", "nunique"),
+        Total_Quantity=("Quantity", "sum"),
+    )
+    .sort_values("Total_Quantity", ascending=False)
+)
+segment_summary["Volume_Share_%"] = (segment_summary["Total_Quantity"] / total_vol * 100).round(2)
+
+display(Markdown("### C. Business Segment Breakdown"))
+display(segment_summary)
+
+# Cross-tab of Volume by Region Id x Business Segment Description
+reg_seg_crosstab = pd.pivot_table(
+    clean_df,
+    index="Region Id",
+    columns="Business Segment Description",
+    values="Quantity",
+    aggfunc="sum",
+    fill_value=0,
+)
+display(Markdown("### D. Volume Matrix: `Region Id` vs. `Business Segment Description`"))
+display(reg_seg_crosstab)
+
+```
+
+---
+
+## Cell 7: Time-Series Trends, Seasonality Heatmap & Visual Diagnostics
+
+```python
+# %% [markdown]
+# ## 6. Time-Series Trends, Seasonality & Cohort Visualizations
+
+# %%
+# ------------------------------------------------------------------------------
+# Figure 1: Total Monthly Volume & Active SKU Count (Oct 2022 – Dec 2025)
+# ------------------------------------------------------------------------------
+overall_ts = (
+    monthly_df.groupby("YearMonth", as_index=False)
+    .agg(
+        Total_Qty=("Monthly_Qty", "sum"),
+        Active_Series=("Part_Region_Key", "nunique"),
+        Total_Orders=("Order_Count", "sum"),
+    )
+    .sort_values("YearMonth")
+)
+overall_ts["YM_Str"] = overall_ts["YearMonth"].astype(str)
+
+fig, ax1 = plt.subplots(figsize=(16, 5))
+ax1.bar(overall_ts["YM_Str"], overall_ts["Total_Qty"], color="#2b5c8f", alpha=0.8, label="Monthly Quantity")
+ax1.set_ylabel("Total Monthly Quantity", color="#2b5c8f", fontweight="bold")
+ax1.yaxis.set_major_formatter(mtick.StrMethodFormatter("{x:,.0f}"))
+ax1.tick_params(axis="x", rotation=45)
+
+ax2 = ax1.twinx()
+ax2.plot(overall_ts["YM_Str"], overall_ts["Active_Series"], color="#d95f02", marker="o", linewidth=2.2, label="Active Part+Region Pairs")
+ax2.set_ylabel("Active (Part Name + Region Id) Count", color="#d95f02", fontweight="bold")
+ax2.grid(False)
+
+plt.title("Monthly Demand Volume & Active SKU-Region Count (Oct 2022 – Dec 2025)")
+fig.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------------------------
+# Figure 2: Year-Presence Cohort Comparison (Series Count vs. Volume Share)
+# ------------------------------------------------------------------------------
+top_cohorts = year_cohort_report.head(12).copy()
+
+fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+sns.barplot(data=top_cohorts, y="Year_Iteration", x="Part_Region_Count", ax=axes[0], palette="viridis")
+axes[0].set_title("SKU-Region Count by Year-Presence Iteration")
+axes[0].set_xlabel("Number of (Part Name + Region Id) Pairs")
+axes[0].set_ylabel("")
+for i, (cnt, pct) in enumerate(zip(top_cohorts["Part_Region_Count"], top_cohorts["Series_Share_%"])):
+    axes[0].text(cnt, i, f" {cnt:,} ({pct}%)", va="center", fontsize=9)
+
+sns.barplot(data=top_cohorts, y="Year_Iteration", x="Total_Quantity", ax=axes[1], palette="magma")
+axes[1].set_title("Total Volume by Year-Presence Iteration")
+axes[1].set_xlabel("Total Quantity")
+axes[1].set_ylabel("")
+axes[1].xaxis.set_major_formatter(mtick.StrMethodFormatter("{x:,.0f}"))
+for i, (qty, pct) in enumerate(zip(top_cohorts["Total_Quantity"], top_cohorts["Volume_Share_%"])):
+    axes[1].text(qty, i, f" {pct}%", va="center", fontsize=9)
+
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------------------------
+# Figure 3: Regional Monthly Volume Trends & Seasonality Heatmap
+# ------------------------------------------------------------------------------
+fig, axes = plt.subplots(1, 2, figsize=(16, 5))
+
+# Left: Monthly trend by Region Id
+reg_monthly = monthly_df.groupby(["YearMonth", "Region Id"], as_index=False)["Monthly_Qty"].sum()
+reg_monthly["YM_Date"] = reg_monthly["YearMonth"].dt.to_timestamp()
+sns.lineplot(data=reg_monthly, x="YM_Date", y="Monthly_Qty", hue="Region Id", marker="o", ax=axes[0])
+axes[0].set_title("Monthly Demand Trend by Region Id")
+axes[0].set_xlabel("Month")
+axes[0].set_ylabel("Quantity")
+axes[0].yaxis.set_major_formatter(mtick.StrMethodFormatter("{x:,.0f}"))
+axes[0].tick_params(axis="x", rotation=30)
+
+# Right: Year x Month Seasonality Heatmap
+season_piv = monthly_df.pivot_table(index="Year", columns="Month", values="Monthly_Qty", aggfunc="sum", fill_value=0)
+sns.heatmap(season_piv / 1e6, annot=True, fmt=".2f", cmap="YlGnBu", ax=axes[1], cbar_kws={"label": "Quantity (Millions)"})
+axes[1].set_title("Seasonality Heatmap: Total Volume (in Millions) by Year & Month")
+axes[1].set_xlabel("Calendar Month (1 = Jan, 12 = Dec)")
+axes[1].set_ylabel("Year")
+
+plt.tight_layout()
+plt.show()
+
+# ------------------------------------------------------------------------------
+# Figure 4: Histogram of Active Months per Part Name + Region Id
+# ------------------------------------------------------------------------------
+plt.figure(figsize=(14, 4))
+sns.histplot(series_profile["Active_Months"], bins=39, kde=False, color="#3b7ea1")
+plt.axvline(12, color="orange", linestyle="--", linewidth=1.8, label="12 Months (1 Year)")
+plt.axvline(24, color="green", linestyle="--", linewidth=1.8, label="24 Months (2 Years)")
+plt.title("Distribution of Active Months per (Part Name + Region Id) [Max = 39 Months]")
+plt.xlabel("Number of Active Months (Oct 2022 – Dec 2025)")
+plt.ylabel("Count of Part Name + Region Id Pairs")
+plt.legend()
+plt.tight_layout()
+plt.show()
+
+```
+
+---
+
+## Cell 8: Export Clean Data & Multi-Sheet Diagnostic Workbook
+
+```python
+# %% [markdown]
+# ## 7. Export Clean Dataset & Diagnostic Reports
+# Saves:
+# 1. `clean_transactions.csv` — Filtered transaction-level dataset
+# 2. `monthly_part_region_aggregated.csv` — Aggregated monthly actuals at `Part Name + Region Id` level
+# 3. `CC_Dec25_EDA_Report.xlsx` — Multi-tab Excel summary containing the Cleaning Waterfall, All Year-Presence Iterations, Forecastability Triage, and Regional Breakdown
+
+# %%
+clean_df.drop(columns=["Part_Region_Key", "YearMonth"]).to_csv(
+    OUTPUT_DIR / "clean_transactions.csv", index=False
+)
+
+monthly_export = monthly_df.copy()
+monthly_export["YearMonth"] = monthly_export["YearMonth"].astype(str)
+monthly_export.drop(columns=["Part_Region_Key"]).to_csv(
+    OUTPUT_DIR / "monthly_part_region_aggregated.csv", index=False
+)
+
+# Convert Period columns to string for Excel export
+series_export = series_profile.copy()
+series_export["First_Month"] = series_export["First_Month"].astype(str)
+series_export["Last_Month"] = series_export["Last_Month"].astype(str)
+
+with pd.ExcelWriter(OUTPUT_DIR / "CC_Dec25_EDA_Report.xlsx", engine="openpyxl") as writer:
+    waterfall_df.to_excel(writer, sheet_name="1_Cleaning_Waterfall", index=False)
+    indep_df.to_excel(writer, sheet_name="2_Independent_Rule_Flags", index=False)
+    year_cohort_report.to_excel(writer, sheet_name="3_Year_Iterations_Report", index=False)
+    months_bucket_report.to_excel(writer, sheet_name="4_Active_Months_Buckets", index=False)
+    triage_report.to_excel(writer, sheet_name="5_Forecastability_Triage", index=False)
+    region_summary.to_excel(writer, sheet_name="6_Regional_EDA", index=False)
+    segment_summary.to_excel(writer, sheet_name="7_Segment_EDA", index=False)
+    series_export.to_excel(writer, sheet_name="8_SKU_Region_Master_List", index=False)
+
+print(f"All outputs successfully saved to: {OUTPUT_DIR.resolve()}")
+
+```
+
+---
+
+### Key Diagnostic Features Built Into This Pipeline
+
+* **Independent vs. Sequential Cleaning Audit (Cell 3):** Distinguishes rows flagged by multiple rules simultaneously (e.g., a `9xx` part that also has `Quantity = 0.0`) from the net sequential drop, alongside a regional retention table to verify no single `Region Id` is disproportionately wiped out by missing `Bulk Value` or `Business Segment Description` entries.
+* **Complete Year-Iteration Exhaustiveness (Cell 5):** Dynamically captures every observed combination across `{2022, 2023, 2024, 2025}` (`2023 Only`, `2024 Only`, `2025 Only`, `2022 - 2023 - 2024 - 2025`, `2023 - 2024 - 2025`, plus intermittent gap cohorts like `2023 - 2025`) together with `Active_In_Q4_2025` recency counts so discontinued SKUs with multi-year history are not mistakenly fed into active 2026 forecast pipelines.
+* **Demand Pattern Classification (Cell 5):** Computes `ADI` (Average Demand Interval) and `CV` (Coefficient of Variation) per `Part Name + Region Id` inside `8_SKU_Region_Master_List`, allowing immediate separation of smooth/erratic series from intermittent series when selecting your forecasting models.

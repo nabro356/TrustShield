@@ -1,0 +1,166 @@
+# ==========================================
+# SLIDE 10 CALLOUT CARDS: EXACT NUMBERS FOR ALL "????" PLACEHOLDERS
+# ==========================================
+
+# 1. Box 3: Inactivity Hotspot (Base Chemicals + Top Inactive Region)
+part_seg_25 = (
+    df_clean.groupby(["Business Segment Description", "Part Name"], as_index=False)
+    .agg(Qty_2025=("Quantity", lambda s: s[df_clean.loc[s.index, "Year"] == 2025].sum()))
+)
+bc = part_seg_25[part_seg_25["Business Segment Description"] == "Base Chemicals"]
+bc_inact = int((bc["Qty_2025"] == 0).sum())
+bc_tot = len(bc)
+
+# Region-level inactivity: (A) Distinct Parts per Region and (B) Bulk x Region series
+part_reg_25 = (
+    df_clean.groupby(["Region Id", "Part Name"], as_index=False)
+    .agg(Qty_2025=("Quantity", lambda s: s[df_clean.loc[s.index, "Year"] == 2025].sum()))
+)
+part_reg_25["Inactive_2025"] = part_reg_25["Qty_2025"] == 0
+reg_part_inact = (
+    part_reg_25.groupby("Region Id", as_index=False)
+    .agg(Total_Parts=("Part Name", "count"), Inactive_Parts=("Inactive_2025", "sum"))
+    .assign(Inactive_Pct=lambda d: (d["Inactive_Parts"] / d["Total_Parts"] * 100).round(1))
+    .sort_values("Inactive_Parts", ascending=False)
+    .reset_index(drop=True)
+)
+
+bulk_reg_25 = (
+    df_clean.groupby(["Region Id", "Bulk Value"], as_index=False)
+    .agg(Qty_2025=("Quantity", lambda s: s[df_clean.loc[s.index, "Year"] == 2025].sum()))
+)
+bulk_reg_25["Inactive_2025"] = bulk_reg_25["Qty_2025"] == 0
+reg_br_inact = (
+    bulk_reg_25.groupby("Region Id", as_index=False)
+    .agg(Total_Bulk_Reg=("Bulk Value", "count"), Inactive_Bulk_Reg=("Inactive_2025", "sum"))
+    .assign(Inactive_Pct=lambda d: (d["Inactive_Bulk_Reg"] / d["Total_Bulk_Reg"] * 100).round(1))
+    .sort_values("Inactive_Bulk_Reg", ascending=False)
+    .reset_index(drop=True)
+)
+
+print("=== BOX 3: INACTIVITY HOTSPOT (BASE CHEMICALS & BY REGION) ===")
+print(f"Base Chemicals Inactive Parts: {bc_inact:,} / {bc_tot:,} ({bc_inact / bc_tot * 100:.1f}%)")
+print("\n[Inactive Parts by Region]")
+display(reg_part_inact)
+print("[Inactive Bulk x Region Series by Region]")
+display(reg_br_inact)
+
+# 2. Box 4: Short History Series (Bulk x Region level)
+pos_df = df_clean[df_clean["Quantity"] > 0]
+br_all = df_clean.groupby(["Bulk Value", "Region Id"], as_index=False).agg(Total_Qty=("Quantity", "sum"))
+yr_pos_cnt = (
+    pos_df.pivot_table(index=["Bulk Value", "Region Id"], columns="Year", values="Quantity", aggfunc="size", fill_value=0)
+    .reindex(columns=[2022, 2023, 2024, 2025], fill_value=0)
+    .reset_index()
+)
+br_suff = br_all.merge(yr_pos_cnt, on=["Bulk Value", "Region Id"], how="left").fillna({2022: 0, 2023: 0, 2024: 0, 2025: 0})
+pos_25 = br_suff[2025]
+pos_prior = br_suff[2022] + br_suff[2023] + br_suff[2024]
+pos_tot = pos_25 + pos_prior
+
+# Exact Slide 10 definition: 2025-only launches with <3 positive records (excluding 2023/24+25 multi-year series)
+short_br_2025_only = int(((pos_25 > 0) & (pos_prior == 0) & (pos_25 < 3)).sum())
+# Alternative broader check: any active-in-2025 Bulk x Region with <3 total positive records across all years
+short_br_all_yrs = int(((pos_25 > 0) & (pos_tot < 3)).sum())
+
+print("\n=== BOX 4: SHORT HISTORY SERIES (BULK × REGION LEVEL) ===")
+print(f"2025-Only Launches (<3 pos records, multi-year excluded): {short_br_2025_only:,} / {len(br_suff):,} ({short_br_2025_only / len(br_suff) * 100:.1f}%)")
+print(f"All Active-in-2025 Series with <3 total pos records       : {short_br_all_yrs:,} / {len(br_suff):,} ({short_br_all_yrs / len(br_suff) * 100:.1f}%)")
+
+# 3. Box 2 Cross-Check: Bulk Inactive in 2025 (Count, % of Bulks, and Historical Demand Share %)
+bulk_yr_qty = (
+    df_clean.pivot_table(index="Bulk Value", columns="Year", values="Quantity", aggfunc="sum", fill_value=0)
+    .reindex(columns=[2022, 2023, 2024, 2025], fill_value=0)
+)
+bulk_yr_qty["Total_Qty"] = bulk_yr_qty.sum(axis=1)
+bulk_yr_qty["Prior_Qty"] = bulk_yr_qty[2022] + bulk_yr_qty[2023] + bulk_yr_qty[2024]
+
+inact_with_prior = bulk_yr_qty[(bulk_yr_qty[2025] == 0) & (bulk_yr_qty["Prior_Qty"] > 0)]
+never_pos_bulks = bulk_yr_qty[(bulk_yr_qty[2025] == 0) & (bulk_yr_qty["Prior_Qty"] == 0)]
+all_zero_2025_bulks = bulk_yr_qty[bulk_yr_qty[2025] == 0]
+
+tot_hist_qty = bulk_yr_qty["Total_Qty"].sum()
+print("\n=== BOX 2 CROSS-CHECK: BULK INACTIVE IN 2025 ===")
+print(f"Inactive in 2025 (had prior demand): {len(inact_with_prior):,} / {len(bulk_yr_qty):,} ({len(inact_with_prior) / len(bulk_yr_qty) * 100:.1f}%) | Hist. Demand Share: {inact_with_prior['Total_Qty'].sum() / tot_hist_qty * 100:.1f}%")
+print(f"All Zero in 2025 (incl. 130 never-pos): {len(all_zero_2025_bulks):,} / {len(bulk_yr_qty):,} ({len(all_zero_2025_bulks) / len(bulk_yr_qty) * 100:.1f}%) | Hist. Demand Share: {all_zero_2025_bulks['Total_Qty'].sum() / tot_hist_qty * 100:.1f}%")
+
+# Ready-to-copy Slide 10 Card Text
+top_reg_p = reg_part_inact.iloc[0]
+print("\n" + "=" * 65)
+print("SLIDE 10 CALLOUT COPY-PASTE:")
+print(f"• Inactivity Hotspot   : Base Chemicals {bc_inact:,} ({bc_inact / bc_tot * 100:.1f}%), Region {top_reg_p['Region Id']} {int(top_reg_p['Inactive_Parts']):,} ({top_reg_p['Inactive_Pct']:.1f}%)")
+print(f"• Short History Series : {short_br_2025_only:,} Bulk × Region series ({short_br_2025_only / len(br_suff) * 100:.1f}%)")
+print("=" * 65)
+
+# ==========================================
+# SLIDE 10: EXACT COPY-PASTE VALUES FOR ALL 4 BOTTOM BOXES
+# ==========================================
+# 1. Box 1 & Box 2: Parts & Bulks Inactive in 2025 (Total_Qty_2025 == 0)
+part_yr = df_clean.pivot_table(index="Part Name", columns="Year", values="Quantity", aggfunc="sum", fill_value=0).reindex(columns=[2022, 2023, 2024, 2025], fill_value=0)
+bulk_yr = df_clean.pivot_table(index="Bulk Value", columns="Year", values="Quantity", aggfunc="sum", fill_value=0).reindex(columns=[2022, 2023, 2024, 2025], fill_value=0)
+
+p_inact_all = int((part_yr[2025] == 0).sum())
+b_inact_all = int((bulk_yr[2025] == 0).sum())
+b_inact_prior = int(((bulk_yr[2025] == 0) & ((bulk_yr[2022] + bulk_yr[2023] + bulk_yr[2024]) > 0)).sum())
+
+# 2. Box 3: Inactivity Hotspot (Base Chemicals + Top Region)
+part_seg_25 = (
+    df_clean.groupby(["Business Segment Description", "Part Name"], as_index=False)
+    .agg(Qty_2025=("Quantity", lambda s: s[df_clean.loc[s.index, "Year"] == 2025].sum()))
+)
+bc = part_seg_25[part_seg_25["Business Segment Description"] == "Base Chemicals"]
+bc_inact, bc_tot = int((bc["Qty_2025"] == 0).sum()), len(bc)
+
+part_reg_25 = (
+    df_clean.groupby(["Region Id", "Part Name"], as_index=False)
+    .agg(Qty_2025=("Quantity", lambda s: s[df_clean.loc[s.index, "Year"] == 2025].sum()))
+)
+reg_part_tbl = (
+    part_reg_25.groupby("Region Id", as_index=False)
+    .agg(Total_Parts=("Part Name", "count"), Inactive_Parts=("Qty_2025", lambda s: int((s == 0).sum())))
+    .assign(Inactive_Pct=lambda d: (d["Inactive_Parts"] / d["Total_Parts"] * 100).round(1))
+    .sort_values("Inactive_Parts", ascending=False)
+    .reset_index(drop=True)
+)
+
+br_25 = (
+    df_clean.groupby(["Region Id", "Bulk Value"], as_index=False)
+    .agg(Qty_2025=("Quantity", lambda s: s[df_clean.loc[s.index, "Year"] == 2025].sum()))
+)
+reg_br_tbl = (
+    br_25.groupby("Region Id", as_index=False)
+    .agg(Total_Bulk_Reg=("Bulk Value", "count"), Inactive_Bulk_Reg=("Qty_2025", lambda s: int((s == 0).sum())))
+    .assign(Inactive_Pct=lambda d: (d["Inactive_Bulk_Reg"] / d["Total_Bulk_Reg"] * 100).round(1))
+    .sort_values("Inactive_Bulk_Reg", ascending=False)
+    .reset_index(drop=True)
+)
+
+# 3. Box 4: Short History Series at Bulk x Region level (2025-only launches with <3 positive records)
+pos_df = df_clean[df_clean["Quantity"] > 0]
+br_all = df_clean.groupby(["Bulk Value", "Region Id"], as_index=False).size().drop(columns="size")
+yr_pos = (
+    pos_df.pivot_table(index=["Bulk Value", "Region Id"], columns="Year", values="Quantity", aggfunc="size", fill_value=0)
+    .reindex(columns=[2022, 2023, 2024, 2025], fill_value=0)
+    .reset_index()
+)
+br_suff = br_all.merge(yr_pos, on=["Bulk Value", "Region Id"], how="left").fillna(0)
+short_br_cnt = int(((br_suff[2025] > 0) & ((br_suff[2022] + br_suff[2023] + br_suff[2024]) == 0) & (br_suff[2025] < 3)).sum())
+
+top_r_part = reg_part_tbl.iloc[0]
+top_r_br = reg_br_tbl.iloc[0]
+
+print("=" * 68)
+print("SLIDE 10 CALLOUT BOXES — READY TO PASTE")
+print("=" * 68)
+print(f"Box 1 | Parts Inactive in 2025 : {p_inact_all:,} ({p_inact_all / len(part_yr) * 100:.1f}%)")
+print(f"Box 2 | Bulk Inactive in 2025  : {b_inact_all:,} ({b_inact_all / len(bulk_yr) * 100:.1f}%)  [or {b_inact_prior:,} ({b_inact_prior / len(bulk_yr) * 100:.1f}%) excl. never-active]")
+print(f"Box 3 | Inactivity Hotspot     : Base Chemicals {bc_inact:,} ({bc_inact / bc_tot * 100:.1f}%), Region {top_r_part['Region Id']} {int(top_r_part['Inactive_Parts']):,} ({top_r_part['Inactive_Pct']:.1f}%)")
+print(f"        (At Bulk×Region level) : Region {top_r_br['Region Id']} {int(top_r_br['Inactive_Bulk_Reg']):,} ({top_r_br['Inactive_Pct']:.1f}%)")
+print(f"Box 4 | Short History Series   : {short_br_cnt:,} ({short_br_cnt / len(br_suff) * 100:.1f}%) Bulk × Region series")
+print("=" * 68)
+
+display(reg_part_tbl)
+display(reg_br_tbl)
+
+
+

@@ -1,75 +1,80 @@
 # ==========================================
-# EXACT ANSWERS FOR SLIDE 7 & SLIDE 8 CALLOUT CARDS
+# SLIDE 8: MULTI-SITE PARTS & BULK CODES (EXCLUDING 1-TO-1 MAPPINGS)
 # ==========================================
-print("=" * 65)
-print("SLIDE 7: DATA GRAIN & TRANSACTION STRUCTURE (CALLOUT CARDS)")
-print("=" * 65)
+def multi_site_audit(df, entity_col, dataset_label):
+    sub = df[[entity_col, "Part Site"]].dropna().drop_duplicates()
+    site_counts = sub.groupby(entity_col)["Part Site"].nunique()
 
-# 1. Orders per day (Overall dataset & Entity-level)
-daily_raw = df_raw.groupby("Date").size()
-daily_clean = df_clean.groupby("Date").size()
+    total_entities = int(len(site_counts))
+    single_site_1to1 = int((site_counts == 1).sum())
+    multi_site_gt1 = int((site_counts > 1).sum())
+    max_sites = int(site_counts.max()) if total_entities > 0 else 0
 
-cal_days_raw = (df_raw["Date"].max() - df_raw["Date"].min()).days + 1
-cal_days_clean = (df_clean["Date"].max() - df_clean["Date"].min()).days + 1
+    summary_row = {
+        "Entity": entity_col,
+        "Dataset": dataset_label,
+        "Total_Distinct_Entities": total_entities,
+        "Single_Site_1to1 (Excluded)": single_site_1to1,
+        "Multi_Site_Count (>1 Site)": multi_site_gt1,
+        "Multi_Site_Share_Pct": round(multi_site_gt1 / total_entities * 100, 2) if total_entities else 0.0,
+        "Max_Sites_Per_Entity": max_sites,
+    }
 
-max_pr_day = df_clean.groupby(["Part Name", "Region Id", "Date"]).size().max()
-max_br_day = df_clean.groupby(["Bulk Value", "Region Id", "Date"]).size().max()
+    # Distribution among multi-site entities only (2, 3, 4, 5+ sites)
+    multi_only = site_counts[site_counts > 1]
+    buckets = pd.cut(
+        multi_only,
+        bins=[1, 2, 3, 4, 1000],
+        labels=["2 Sites", "3 Sites", "4 Sites", "5+ Sites"]
+    )
+    dist_df = (
+        buckets.value_counts()
+        .reindex(["2 Sites", "3 Sites", "4 Sites", "5+ Sites"], fill_value=0)
+        .rename("Entity_Count")
+        .reset_index()
+        .rename(columns={"index": "Site_Span_Bucket"})
+    )
+    dist_df.insert(0, "Entity", entity_col)
+    dist_df.insert(1, "Dataset", dataset_label)
+    dist_df["Pct_Of_Multi_Site"] = (
+        (dist_df["Entity_Count"] / multi_site_gt1 * 100).round(2) if multi_site_gt1 else 0.0
+    )
 
-print(f"\n[Card 2: Maximum Orders per Day]")
-print(f"  Raw Dataset Max on a Single Date   : {daily_raw.max():,} rows (on {daily_raw.idxmax():%Y-%m-%d})")
-print(f"  Clean Dataset Max on a Single Date : {daily_clean.max():,} rows (on {daily_clean.idxmax():%Y-%m-%d})")
-print(f"  Max Same-Day Orders (Part+Region)  : {max_pr_day:,}")
-print(f"  Max Same-Day Orders (Bulk+Region)  : {max_br_day:,}")
+    # Top multi-site entities with exact site list
+    top_df = (
+        sub.groupby(entity_col)["Part Site"]
+        .agg(Distinct_Sites="nunique", Sites_List=lambda s: " | ".join(sorted(s)))
+        .query("Distinct_Sites > 1")
+        .sort_values(["Distinct_Sites", entity_col], ascending=[False, True])
+        .reset_index()
+    )
 
-print(f"\n[Card 3: Avg. Orders per Day]")
-print(f"  Raw Avg per Active Order Day       : {daily_raw.mean():,.1f} rows/day (across {len(daily_raw):,} active days)")
-print(f"  Clean Avg per Active Order Day     : {daily_clean.mean():,.1f} rows/day (across {len(daily_clean):,} active days)")
-print(f"  Clean Avg per Calendar Day         : {len(df_clean) / cal_days_clean:,.1f} rows/day (across {cal_days_clean:,} calendar days)")
+    return summary_row, dist_df, top_df
 
-# 2. Monthly grain consolidation points
-br_ym_raw = len(df_raw.dropna(subset=["Bulk Value", "Region Id", "YearMonth"]).drop_duplicates(["Bulk Value", "Region Id", "YearMonth"]))
-br_ym_clean = len(df_clean.drop_duplicates(["Bulk Value", "Region Id", "YearMonth"]))
+# Compute for Part Name & Bulk Value (Clean + Raw for cross-checking)
+p_clean_sum, p_clean_dist, p_clean_top = multi_site_audit(df_clean, "Part Name", "Clean")
+b_clean_sum, b_clean_dist, b_clean_top = multi_site_audit(df_clean, "Bulk Value", "Clean")
+p_raw_sum, p_raw_dist, _ = multi_site_audit(df_raw, "Part Name", "Raw")
+b_raw_sum, b_raw_dist, _ = multi_site_audit(df_raw, "Bulk Value", "Raw")
 
-pr_ym_raw = len(df_raw.dropna(subset=["Part Name", "Region Id", "YearMonth"]).drop_duplicates(["Part Name", "Region Id", "YearMonth"]))
-pr_ym_clean = len(df_clean.drop_duplicates(["Part Name", "Region Id", "YearMonth"]))
+df_multisite_summary = pd.DataFrame([p_clean_sum, b_clean_sum, p_raw_sum, b_raw_sum])
+df_multisite_dist = pd.concat([p_clean_dist, b_clean_dist], ignore_index=True)
 
-print(f"\n[Card 4: Monthly Grain Consolidates]")
-print(f"  Bulk x Region x Month (Clean)      : {br_ym_clean:,} points  (Raw: {br_ym_raw:,})")
-print(f"  Part x Region x Month (Clean)      : {pr_ym_clean:,} points  (Raw: {pr_ym_raw:,})")
+print("--- 1. MULTI-SITE SUMMARY (EXCLUDING 1-TO-1 MAPPINGS) ---")
+display(df_multisite_summary)
 
+print("\n--- 2. MULTI-SITE BREAKDOWN BY NUMBER OF SITES (CLEAN DATA) ---")
+display(df_multisite_dist)
+
+print("\n--- 3. TOP 15 MULTI-SITE PARTS (CLEAN DATA) ---")
+display(p_clean_top.head(15))
+
+print("\n--- 4. TOP 15 MULTI-SITE BULK CODES (CLEAN DATA) ---")
+display(b_clean_top.head(15))
+
+# Ready-to-copy Slide 8 callout text
 print("\n" + "=" * 65)
-print("SLIDE 8: MASTER DATA INTEGRITY & HIERARCHY MAPPING (CALLOUT CARDS)")
+print("SLIDE 8 CALLOUT COPY-PASTE:")
+print(f"• Parts in multiple sites : {p_clean_sum['Multi_Site_Count (>1 Site)']:,} of {p_clean_sum['Total_Distinct_Entities']:,} ({p_clean_sum['Multi_Site_Share_Pct']:.1f}%, max {p_clean_sum['Max_Sites_Per_Entity']} sites)")
+print(f"• Bulks in multiple sites : {b_clean_sum['Multi_Site_Count (>1 Site)']:,} of {b_clean_sum['Total_Distinct_Entities']:,} ({b_clean_sum['Multi_Site_Share_Pct']:.1f}%, max {b_clean_sum['Max_Sites_Per_Entity']} sites)")
 print("=" * 65)
-
-def card_stats(df, src, tgt):
-    sub = df[[src, tgt]].dropna().drop_duplicates()
-    cnts = sub.groupby(src)[tgt].nunique()
-    return int((cnts > 1).sum()), int(cnts.max()) if len(cnts) else 0
-
-b_site_n, b_site_max = card_stats(df_clean, "Bulk Value", "Part Site")
-b_reg_n, b_reg_max = card_stats(df_clean, "Bulk Value", "Region Id")
-b_seg_n, b_seg_max = card_stats(df_clean, "Bulk Value", "Business Segment Description")
-p_site_n, p_site_max = card_stats(df_clean, "Part Name", "Part Site")
-p_seg_n, p_seg_max = card_stats(df_clean, "Part Name", "Business Segment Description")
-
-print(f"\n[Card 1: Parts span sites & regions]")
-print(f"  Parts in multiple sites            : {p_site_n:,} (max {p_site_max} sites)")
-
-print(f"\n[Card 2: Bulk span sites & regions]")
-print(f"  Bulk in multiple sites             : {b_site_n:,} (max {b_site_max} sites)")
-print(f"  Bulk in multiple regions           : {b_reg_n:,} (max {b_reg_max} regions)")
-
-print(f"\n[Card 3: Multi-segment parts]")
-print(f"  Parts in multiple segments         : {p_seg_n:,} (max {p_seg_max} segments)")
-
-print(f"\n[Card 4: Multi-segment Bulk]")
-print(f"  Bulk in multiple segments          : {b_seg_n:,} (max {b_seg_max} segments)")
-
-# Verify bottom 3 clean 1:1 boxes on Slide 8
-p_desc_n, _ = card_stats(df_clean, "Part Name", "Part Description")
-s_desc_n, _ = card_stats(df_clean, "Business Segment Value", "Business Segment Description")
-site_reg_n, _ = card_stats(df_clean, "Part Site", "Region Id")
-print(f"\n[Bottom 3 Verification Boxes (Clean Data)]")
-print(f"  Part -> Description conflicts      : {p_desc_n}")
-print(f"  Segment Code -> Desc conflicts     : {s_desc_n}")
-print(f"  Site -> Region conflicts           : {site_reg_n}")

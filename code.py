@@ -1,94 +1,75 @@
 # ==========================================
-# SLIDE 6 (EXTRA): MONTHLY DEMAND TRENDS BY BUSINESS SEGMENT & BY REGION
+# EXACT ANSWERS FOR SLIDE 7 & SLIDE 8 CALLOUT CARDS
 # ==========================================
-all_ym = pd.period_range(df_clean["YearMonth"].min(), df_clean["YearMonth"].max(), freq="M")
-ym_labels = [str(p) for p in all_ym]
-x_idx = np.arange(len(all_ym))
+print("=" * 65)
+print("SLIDE 7: DATA GRAIN & TRANSACTION STRUCTURE (CALLOUT CARDS)")
+print("=" * 65)
 
-# 1. Business Segment Monthly Pivot (ordered by total volume descending)
-seg_order = (
-    df_clean.groupby("Business Segment Description")["Quantity"]
-    .sum()
-    .sort_values(ascending=False)
-    .index.tolist()
-)
-seg_monthly = (
-    df_clean.pivot_table(
-        index="YearMonth", columns="Business Segment Description",
-        values="Quantity", aggfunc="sum", fill_value=0
-    )
-    .reindex(index=all_ym, columns=seg_order, fill_value=0)
-)
+# 1. Orders per day (Overall dataset & Entity-level)
+daily_raw = df_raw.groupby("Date").size()
+daily_clean = df_clean.groupby("Date").size()
 
-# 2. Region Id Monthly Pivot (ordered by total volume descending)
-reg_order = (
-    df_clean.groupby("Region Id")["Quantity"]
-    .sum()
-    .sort_values(ascending=False)
-    .index.tolist()
-)
-reg_monthly = (
-    df_clean.pivot_table(
-        index="YearMonth", columns="Region Id",
-        values="Quantity", aggfunc="sum", fill_value=0
-    )
-    .reindex(index=all_ym, columns=reg_order, fill_value=0)
-)
+cal_days_raw = (df_raw["Date"].max() - df_raw["Date"].min()).days + 1
+cal_days_clean = (df_clean["Date"].max() - df_clean["Date"].min()).days + 1
 
-markers = ["o", "s", "^", "D", "v", "P", "X", "*"]
+max_pr_day = df_clean.groupby(["Part Name", "Region Id", "Date"]).size().max()
+max_br_day = df_clean.groupby(["Bulk Value", "Region Id", "Date"]).size().max()
 
-# --- PLOT 1: ALL BUSINESS SEGMENTS ON ONE LINE GRAPH ---
-fig, ax = plt.subplots(figsize=(13.5, 5.6))
-seg_colors = sns.color_palette("tab10", len(seg_order))
+print(f"\n[Card 2: Maximum Orders per Day]")
+print(f"  Raw Dataset Max on a Single Date   : {daily_raw.max():,} rows (on {daily_raw.idxmax():%Y-%m-%d})")
+print(f"  Clean Dataset Max on a Single Date : {daily_clean.max():,} rows (on {daily_clean.idxmax():%Y-%m-%d})")
+print(f"  Max Same-Day Orders (Part+Region)  : {max_pr_day:,}")
+print(f"  Max Same-Day Orders (Bulk+Region)  : {max_br_day:,}")
 
-for i, seg in enumerate(seg_order):
-    ax.plot(
-        x_idx, seg_monthly[seg].values,
-        label=seg, color=seg_colors[i],
-        marker=markers[i % len(markers)], markersize=4.5, linewidth=2.0
-    )
+print(f"\n[Card 3: Avg. Orders per Day]")
+print(f"  Raw Avg per Active Order Day       : {daily_raw.mean():,.1f} rows/day (across {len(daily_raw):,} active days)")
+print(f"  Clean Avg per Active Order Day     : {daily_clean.mean():,.1f} rows/day (across {len(daily_clean):,} active days)")
+print(f"  Clean Avg per Calendar Day         : {len(df_clean) / cal_days_clean:,.1f} rows/day (across {cal_days_clean:,} calendar days)")
 
-ax.set_xticks(x_idx)
-ax.set_xticklabels(ym_labels, rotation=65, ha="right", fontsize=8.5)
-ax.yaxis.set_major_formatter(mtick.StrMethodFormatter("{x:,.0f}"))
-ax.set_ylim(0, seg_monthly.values.max() * 1.15)
-ax.set_title("Monthly Demand Trend by Business Segment (Oct 2022 – Dec 2025)", fontsize=13, fontweight="bold", color=NAVY, pad=12)
-ax.set_ylabel("Total Quantity", fontsize=10)
-ax.legend(title="Business Segment", bbox_to_anchor=(1.01, 1), loc="upper left", frameon=False, fontsize=9, title_fontsize=9.5)
-ax.grid(axis="y", linestyle="--", alpha=0.4)
-ax.grid(axis="x", visible=False)
-sns.despine(top=True, right=True)
+# 2. Monthly grain consolidation points
+br_ym_raw = len(df_raw.dropna(subset=["Bulk Value", "Region Id", "YearMonth"]).drop_duplicates(["Bulk Value", "Region Id", "YearMonth"]))
+br_ym_clean = len(df_clean.drop_duplicates(["Bulk Value", "Region Id", "YearMonth"]))
 
-plt.tight_layout()
-s6_seg_png = os.path.join(OUT_DIR, "Slide6_Monthly_Demand_By_Segment.png")
-plt.savefig(s6_seg_png, dpi=300, bbox_inches="tight")
-plt.show()
+pr_ym_raw = len(df_raw.dropna(subset=["Part Name", "Region Id", "YearMonth"]).drop_duplicates(["Part Name", "Region Id", "YearMonth"]))
+pr_ym_clean = len(df_clean.drop_duplicates(["Part Name", "Region Id", "YearMonth"]))
 
-# --- PLOT 2: ALL REGIONS ON ONE LINE GRAPH ---
-fig, ax = plt.subplots(figsize=(13.5, 5.4))
-reg_colors = [NAVY, TEAL, ORANGE, BLUE, AMBER] + list(sns.color_palette("Set2", max(0, len(reg_order) - 5)))
+print(f"\n[Card 4: Monthly Grain Consolidates]")
+print(f"  Bulk x Region x Month (Clean)      : {br_ym_clean:,} points  (Raw: {br_ym_raw:,})")
+print(f"  Part x Region x Month (Clean)      : {pr_ym_clean:,} points  (Raw: {pr_ym_raw:,})")
 
-for i, reg in enumerate(reg_order):
-    ax.plot(
-        x_idx, reg_monthly[reg].values,
-        label=reg, color=reg_colors[i],
-        marker=markers[i % len(markers)], markersize=5.0, linewidth=2.2
-    )
+print("\n" + "=" * 65)
+print("SLIDE 8: MASTER DATA INTEGRITY & HIERARCHY MAPPING (CALLOUT CARDS)")
+print("=" * 65)
 
-ax.set_xticks(x_idx)
-ax.set_xticklabels(ym_labels, rotation=65, ha="right", fontsize=8.5)
-ax.yaxis.set_major_formatter(mtick.StrMethodFormatter("{x:,.0f}"))
-ax.set_ylim(0, reg_monthly.values.max() * 1.15)
-ax.set_title("Monthly Demand Trend by Region Id (Oct 2022 – Dec 2025)", fontsize=13, fontweight="bold", color=NAVY, pad=12)
-ax.set_ylabel("Total Quantity", fontsize=10)
-ax.legend(title="Region Id", ncol=len(reg_order), loc="upper left", frameon=True, fontsize=9, title_fontsize=9.5)
-ax.grid(axis="y", linestyle="--", alpha=0.4)
-ax.grid(axis="x", visible=False)
-sns.despine(top=True, right=True)
+def card_stats(df, src, tgt):
+    sub = df[[src, tgt]].dropna().drop_duplicates()
+    cnts = sub.groupby(src)[tgt].nunique()
+    return int((cnts > 1).sum()), int(cnts.max()) if len(cnts) else 0
 
-plt.tight_layout()
-s6_reg_png = os.path.join(OUT_DIR, "Slide6_Monthly_Demand_By_Region.png")
-plt.savefig(s6_reg_png, dpi=300, bbox_inches="tight")
-plt.show()
+b_site_n, b_site_max = card_stats(df_clean, "Bulk Value", "Part Site")
+b_reg_n, b_reg_max = card_stats(df_clean, "Bulk Value", "Region Id")
+b_seg_n, b_seg_max = card_stats(df_clean, "Bulk Value", "Business Segment Description")
+p_site_n, p_site_max = card_stats(df_clean, "Part Name", "Part Site")
+p_seg_n, p_seg_max = card_stats(df_clean, "Part Name", "Business Segment Description")
 
-print(f"Saved charts -> '{s6_seg_png}' & '{s6_reg_png}'")
+print(f"\n[Card 1: Parts span sites & regions]")
+print(f"  Parts in multiple sites            : {p_site_n:,} (max {p_site_max} sites)")
+
+print(f"\n[Card 2: Bulk span sites & regions]")
+print(f"  Bulk in multiple sites             : {b_site_n:,} (max {b_site_max} sites)")
+print(f"  Bulk in multiple regions           : {b_reg_n:,} (max {b_reg_max} regions)")
+
+print(f"\n[Card 3: Multi-segment parts]")
+print(f"  Parts in multiple segments         : {p_seg_n:,} (max {p_seg_max} segments)")
+
+print(f"\n[Card 4: Multi-segment Bulk]")
+print(f"  Bulk in multiple segments          : {b_seg_n:,} (max {b_seg_max} segments)")
+
+# Verify bottom 3 clean 1:1 boxes on Slide 8
+p_desc_n, _ = card_stats(df_clean, "Part Name", "Part Description")
+s_desc_n, _ = card_stats(df_clean, "Business Segment Value", "Business Segment Description")
+site_reg_n, _ = card_stats(df_clean, "Part Site", "Region Id")
+print(f"\n[Bottom 3 Verification Boxes (Clean Data)]")
+print(f"  Part -> Description conflicts      : {p_desc_n}")
+print(f"  Segment Code -> Desc conflicts     : {s_desc_n}")
+print(f"  Site -> Region conflicts           : {site_reg_n}")
